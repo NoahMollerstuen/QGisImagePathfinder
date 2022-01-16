@@ -9,4 +9,4 @@ Follow these instructions to install and use this plugin
 5. In QGis, go to Processing→Toolbox or press Ctrl+Alt+T.
 6. Open the "Find Paths" group and double-click on "Find Path".
 ## Usage Example
-![Image showing a slope map with a white route plotted across it](Readme Example.png)
+![Image showing a slope map with a white route plotted across it](readme_example.png)
