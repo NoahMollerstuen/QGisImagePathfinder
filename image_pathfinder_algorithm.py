@@ -51,7 +51,7 @@ from qgis.core import (QgsProject,
 from osgeo import gdal
 import heapq
 
-from image_pathfinder.formulas import evaluate_formula
+from .formulas import parse_formula, evaluate_formula
 
 NEIGHBORS = ((0, 1), (1, 0), (0, -1), (-1, 0))
 
@@ -74,11 +74,26 @@ def a_star_heuristic(pos1: (int, int), pos2: (int, int)) -> int:
     return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
 
 
-def get_neighbors(pos: (int, int), occupancy_grid: np.ndarray):
+def get_neighbors(pos: (int, int), max_x, max_y):
     return [
         p for p in ((pos[0] + n[0], pos[1] + n[1]) for n in NEIGHBORS) if
-        0 <= p[0] < occupancy_grid.shape[1] and 0 <= p[1] < occupancy_grid.shape[0] and not occupancy_grid[p[1]][p[0]]
+        0 <= p[0] < max_x and 0 <= p[1] < max_y
     ]
+
+
+def eval_expression_at_pos(formula: str, pos: (int, int), inp_arrays, parsed_formula=None):
+    x = pos[0]
+    y = pos[1]
+    vars_dict = {
+        "x": x,
+        "y": y
+    }
+
+    for i, arr in enumerate(inp_arrays):
+        s = str(i + 1)
+        vars_dict["val" + s] = arr[y][x]
+
+    return evaluate_formula(formula, vars_dict, parsed_formula)
 
 
 class PriorityQueue:
@@ -114,12 +129,13 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
     # calling from the QGIS console.
     OUTPUT = 'OUTPUT'
 
-    INPUT_IMG = 'INPUT_IMG'
+    INPUT_IMAGES = ["INPUT_IMG" + str(i) for i in range(3)]
     INPUT_POINT1 = 'INPUT_POINT1'
     INPUT_POINT2 = 'INPUT_POINT2'
     INPUT_MIN_VAL = 'INPUT_MIN_VAL'
     INPUT_MAX_VAL = 'INPUT_MAX_VAL'
-    INPUT_EXPRESSION = 'INPUT_EXPRESSION'
+    INPUT_TRAVERSABILITY_EXPRESSION = 'INPUT_TRAVERSABILITY_EXPRESSION'
+    INPUT_COST_EXPRESSION = 'INPUT_COST_EXPRESSION'
 
     def initAlgorithm(self, config):
         """
@@ -129,8 +145,24 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
 
         self.addParameter(
             QgsProcessingParameterRasterLayer(
-                self.INPUT_IMG,
-                self.tr('Input layer')
+                self.INPUT_IMAGES[0],
+                self.tr('Primary Input Image')
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.INPUT_IMAGES[1],
+                self.tr('Secondary Input Image'),
+                optional=True
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.INPUT_IMAGES[2],
+                self.tr('Tertiary Input Image'),
+                optional=True
             )
         )
 
@@ -151,7 +183,7 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.INPUT_MIN_VAL,
-                self.tr('Minimum Passable Value'),
+                self.tr('Minimum Traversable Value'),
                 optional=True
             )
         )
@@ -159,22 +191,27 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.INPUT_MAX_VAL,
-                self.tr('Maximum Passable Value'),
+                self.tr('Maximum Traversable Value'),
                 optional=True
             )
         )
 
         self.addParameter(
             QgsProcessingParameterString(
-                self.INPUT_EXPRESSION,
-                self.tr('Custom Cost Function'),
+                self.INPUT_TRAVERSABILITY_EXPRESSION,
+                self.tr('Custom Traversability Expression'),
                 optional=True
             )
         )
 
-        # We add a feature sink in which to store our processed features (this
-        # usually takes the form of a newly created vector layer when the
-        # algorithm is run in QGIS).
+        self.addParameter(
+            QgsProcessingParameterString(
+                self.INPUT_COST_EXPRESSION,
+                self.tr('Custom Cost Expression'),
+                optional=True
+            )
+        )
+
         self.addParameter(
             QgsProcessingParameterFeatureSink(
                 self.OUTPUT,
@@ -187,56 +224,68 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         Here is where the processing itself takes place.
         """
 
-        # Retrieve the feature source and sink. The 'dest_id' variable is used
-        # to uniquely identify the feature sink, and must be included in the
-        # dictionary returned by the processAlgorithm function.
-        inp_img = self.parameterAsRasterLayer(parameters, self.INPUT_IMG, context)
+        inp_layers = []
+        for code in self.INPUT_IMAGES:
+            param = self.parameterAsRasterLayer(parameters, code, context)
+            if param is not None:
+                inp_layers.append(param)
+
         start_point = self.parameterAsPoint(parameters, self.INPUT_POINT1, context)
         end_point = self.parameterAsPoint(parameters, self.INPUT_POINT2, context)
-        min_val = self.parameterAsString(parameters, self.INPUT_MIN_VAL, context)
-        max_val = self.parameterAsString(parameters, self.INPUT_MAX_VAL, context)
-        cost_expression = self.parameterAsString(parameters, self.INPUT_EXPRESSION, context)
-        if cost_expression == "":
-            cost_expression = None
-        print(cost_expression)
 
+        min_val = self.parameterAsString(parameters, self.INPUT_MIN_VAL, context)
         try:
-            min_val = int(min_val)
+            min_val = float(min_val)
         except ValueError:
             min_val = None
+        max_val = self.parameterAsString(parameters, self.INPUT_MAX_VAL, context)
         try:
-            max_val = int(max_val)
+            max_val = float(max_val)
         except ValueError:
             max_val = None
 
-        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT, context, QgsFields(),
-                                               geometryType=QgsWkbTypes.Type.LineString, crs=inp_img.crs())
+        cost_expression_str = self.parameterAsString(parameters, self.INPUT_COST_EXPRESSION, context)
+        if cost_expression_str == "":
+            cost_expression = None
+        else:
+            cost_expression = parse_formula(cost_expression_str)
 
-        bounding_rect = inp_img.extent()
+        traversability_expression_str = self.parameterAsString(
+            parameters, self.INPUT_TRAVERSABILITY_EXPRESSION, context)
+        if traversability_expression_str == "":
+            traversability_expression = None
+        else:
+            traversability_expression = parse_formula(traversability_expression_str)
+
+        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT, context, QgsFields(),
+                                               geometryType=QgsWkbTypes.Type.LineString, crs=inp_layers[0].crs())
+
+        bounding_rect = inp_layers[0].extent()
 
         if not bounding_rect.contains(start_point):
-            raise ValueError(self.tr("Starting Point must be somewhere within the raster image"))
+            raise ValueError(self.tr("Starting Point must be somewhere within the first raster image"))
         if not bounding_rect.contains(end_point):
-            raise ValueError(self.tr("Ending Point must be somewhere within the raster image"))
+            raise ValueError(self.tr("Ending Point must be somewhere within the first raster image"))
 
-        img_ds = gdal.Open(inp_img.dataProvider().dataSourceUri())
-        inp_arr: np.ndarray = img_ds.GetRasterBand(1).ReadAsArray()
+        inp_arrs: t.List[np.ndarray] = []
+        for layer in inp_layers:
+            img_ds = gdal.Open(layer.dataProvider().dataSourceUri())
+            inp_arrs.append(img_ds.GetRasterBand(1).ReadAsArray())
 
-        if min_val is not None and max_val is not None:
-            occupancy_mat = np.logical_or(inp_arr < min_val, inp_arr > max_val)
-        elif min_val is not None:
-            occupancy_mat = inp_arr < min_val
-        elif max_val is not None:
-            occupancy_mat = inp_arr > max_val
-        else:
-            raise ValueError(self.tr("At least one of minimum and maximum value must be set"))
-
-        start_pos = point_to_pixel(start_point, bounding_rect, occupancy_mat.shape[1], occupancy_mat.shape[0])
-        if occupancy_mat[start_pos[1]][start_pos[0]]:
-            raise ValueError(self.tr("Starting Point cannot be in an impassable area"))
-        end_pos = point_to_pixel(end_point, bounding_rect, occupancy_mat.shape[1], occupancy_mat.shape[0])
-        if occupancy_mat[end_pos[1]][end_pos[0]]:
-            raise ValueError(self.tr("Ending Point cannot be in an impassable area"))
+        start_pos = point_to_pixel(start_point, bounding_rect, inp_arrs[0].shape[1], inp_arrs[0].shape[0])
+        if (min_val is not None and inp_arrs[0][start_pos[1]][start_pos[0]] < min_val) \
+                or (max_val is not None and inp_arrs[0][start_pos[1]][start_pos[0]] > max_val) \
+                or (traversability_expression is not None and not eval_expression_at_pos(traversability_expression_str,
+                                                                                         start_pos, inp_arrs,
+                                                                                         traversability_expression)):
+            raise ValueError(self.tr("Starting Point must be in a traversable area"))
+        end_pos = point_to_pixel(end_point, bounding_rect, inp_arrs[0].shape[1], inp_arrs[0].shape[0])
+        if (min_val is not None and inp_arrs[0][end_pos[1]][end_pos[0]] < min_val) \
+                or (max_val is not None and inp_arrs[0][end_pos[1]][end_pos[0]] > max_val) \
+                or (traversability_expression is not None and not eval_expression_at_pos(traversability_expression_str,
+                                                                                         end_pos, inp_arrs,
+                                                                                         traversability_expression)):
+            raise ValueError(self.tr("Ending Point must be in a traversable area"))
 
         # A* Algorithm
         frontier = PriorityQueue()
@@ -247,10 +296,12 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         starting_heuristic = a_star_heuristic(start_pos, end_pos)
         min_heuristic = starting_heuristic
 
+        warned_inadmissible_heuristic = False
+
         print("Starting A*")
         while True:
             if feedback.isCanceled():
-                return
+                raise RuntimeError("Task Cancelled")
             feedback.setProgress((1 - min_heuristic / starting_heuristic) * 100)
 
             if frontier.empty():
@@ -260,9 +311,22 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
             if current == end_pos:
                 break
 
-            for next_pos in get_neighbors(current, occupancy_mat):
-                add_cost = (1 if cost_expression is None else
-                            evaluate_formula(cost_expression, {"val": inp_arr[current[1]][current[0]]}))
+            neighbors = [n for n in get_neighbors(current, inp_arrs[0].shape[1], inp_arrs[0].shape[1]) if
+                         (min_val is None or inp_arrs[0][n[1]][n[0]] >= min_val) and
+                         (max_val is None or inp_arrs[0][n[1]][n[0]] <= max_val) and
+                         (traversability_expression is None or
+                          eval_expression_at_pos(traversability_expression_str, n, inp_arrs, traversability_expression))
+                         ]
+            for next_pos in neighbors:
+                if cost_expression is None:
+                    add_cost = 1
+                else:
+                    add_cost = eval_expression_at_pos(cost_expression_str, next_pos, inp_arrs, cost_expression)
+                    if not warned_inadmissible_heuristic and add_cost < 1:
+                        warned_inadmissible_heuristic = True
+                        feedback.pushInfo(
+                            self.tr("[WARNING] Custom cost expression is less than 1, path may not be optimal!"))
+
                 new_cost = cost_so_far[current] + add_cost
                 if next_pos not in cost_so_far or new_cost < cost_so_far[next_pos]:
                     cost_so_far[next_pos] = new_cost
@@ -277,19 +341,18 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         path = []
         while True:
             if feedback.isCanceled():
-                return
+                raise RuntimeError("Task Cancelled")
             next_point = came_from[current_point]
             if last_point is None or next_point is None or \
                     next_point[0] - current_point[0] != current_point[0] - last_point[0] or \
                     next_point[1] - current_point[1] != current_point[1] - last_point[1]:
                 path.append(pixel_to_point(current_point, bounding_rect,
-                                           occupancy_mat.shape[1], occupancy_mat.shape[0]))
+                                           inp_arrs[0].shape[1], inp_arrs[0].shape[0]))
 
             if current_point == start_pos:
                 break
             last_point = current_point
             current_point = next_point
-        print(len(path))
 
         # Add a feature in the sink
         feature = QgsFeature()

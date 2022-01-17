@@ -49,7 +49,7 @@ class FormulaRuntimeError(FormulaError):
 MAX_FORMULA_LENGTH = 255
 
 
-def evaluate_formula(formula: str, vars: Dict[str, Any]) -> float:
+def parse_formula(formula: str):
     if len(formula) > MAX_FORMULA_LENGTH:
         raise FormulaSyntaxError("The formula is too long", 1, 1)
 
@@ -57,7 +57,11 @@ def evaluate_formula(formula: str, vars: Dict[str, Any]) -> float:
         node = ast.parse(formula, "<string>", mode="eval")
     except SyntaxError as e:
         raise FormulaSyntaxError.from_syntax_error(e, "Could not parse")
+    return node
 
+
+def evaluate_formula(formula: str, vars: Dict[str, Any], parsed_node=None) -> float:
+    node = parsed_node or parse_formula(formula)
     try:
         return eval_node(formula, node, vars)
     except FormulaSyntaxError:
@@ -73,6 +77,7 @@ def eval_node(source: str, node: ast.AST, vars: Dict[str, Any]) -> float:
         ast.Name: eval_name,
         ast.BinOp: eval_binop,
         ast.UnaryOp: eval_unaryop,
+        ast.Compare: eval_cmpop
     }
 
     for ast_type, evaluator in EVALUATORS.items():
@@ -106,6 +111,7 @@ def eval_binop(source: str, node: ast.BinOp, vars: Dict[str, Any]) -> float:
         ast.Sub: operator.sub,
         ast.Mult: operator.mul,
         ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
     }
 
     left_value = eval_node(source, node.left, vars)
@@ -114,7 +120,7 @@ def eval_binop(source: str, node: ast.BinOp, vars: Dict[str, Any]) -> float:
     try:
         apply = OPERATIONS[type(node.op)]
     except KeyError:
-        raise FormulaSyntaxError.from_ast_node(source, node, "Operations of this type are not supported")
+        raise FormulaSyntaxError.from_ast_node(source, node, f"Operations of type {type(node.op)} are not supported")
 
     return apply(left_value, right_value)
 
@@ -129,6 +135,34 @@ def eval_unaryop(source: str, node: ast.UnaryOp, vars: Dict[str, Any]) -> float:
     try:
         apply = OPERATIONS[type(node.op)]
     except KeyError:
-        raise FormulaSyntaxError.from_ast_node(source, node, "Operations of this type are not supported")
+        raise FormulaSyntaxError.from_ast_node(source, node, f"Operations of type {type(node.op)} are not supported")
 
     return apply(operand_value)
+
+
+def eval_cmpop(source: str, node: ast.Compare, vars: Dict[str, Any]) -> float:
+    OPERATIONS = {
+        ast.Eq: operator.eq,
+        ast.NotEq: operator.ne,
+        ast.Lt: operator.lt,
+        ast.LtE: operator.le,
+        ast.Gt: operator.gt,
+        ast.GtE: operator.ge
+    }
+
+    vals = [eval_node(source, node.left, vars)]
+
+    for c in node.comparators:
+        vals.append(eval_node(source, c, vars))
+
+    ops = node.ops
+
+    result = True
+    for i in range(len(ops)):
+        try:
+            apply = OPERATIONS[type(ops[i])]
+            result = result and apply(vals[i], vals[i+1])
+        except KeyError:
+            raise FormulaSyntaxError.from_ast_node(source, node, f"Operations of type {type(node.op)} are not supported")
+
+    return result
