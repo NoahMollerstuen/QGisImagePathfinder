@@ -354,7 +354,6 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         last_point = None
         path = []
         while True:
-            print(current_point)
             if feedback.isCanceled():
                 raise RuntimeError("Task Cancelled")
             delta_code = came_from[current_point[1]][current_point[0]]
