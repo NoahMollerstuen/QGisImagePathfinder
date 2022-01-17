@@ -53,6 +53,13 @@ import heapq
 
 from .formulas import parse_formula, evaluate_formula
 
+DIRECTION_MAPPING = {
+    (0, 1): 1,  # 0 is reserved for None
+    (1, 0): 2,
+    (0, -1): 3,
+    (-1, 0): 4
+}
+DIRECTION_MAPPING_INV = {v: k for k, v in DIRECTION_MAPPING.items()}
 NEIGHBORS = ((0, 1), (1, 0), (0, -1), (-1, 0))
 
 
@@ -76,18 +83,21 @@ def a_star_heuristic(pos1: (int, int), pos2: (int, int)) -> int:
 
 def get_neighbors(pos: (int, int), max_x, max_y):
     return [
-        p for p in ((pos[0] + n[0], pos[1] + n[1]) for n in NEIGHBORS) if
-        0 <= p[0] < max_x and 0 <= p[1] < max_y
+        p for p in (((pos[0] + n[0], pos[1] + n[1]), n) for n in NEIGHBORS) if
+        0 <= p[0][0] < max_x and 0 <= p[0][1] < max_y
     ]
 
 
+vars_dict = {}
+
+
 def eval_expression_at_pos(formula: str, pos: (int, int), inp_arrays, parsed_formula=None):
+    global vars_dict
+
     x = pos[0]
     y = pos[1]
-    vars_dict = {
-        "x": x,
-        "y": y
-    }
+    vars_dict["x"] = x
+    vars_dict["y"] = y
 
     for i, arr in enumerate(inp_arrays):
         s = str(i + 1)
@@ -290,8 +300,12 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         # A* Algorithm
         frontier = PriorityQueue()
         frontier.put(start_pos, 0)
-        came_from: t.Dict[(int, int), t.Optional[(int, int)]] = {start_pos: None}
-        cost_so_far: t.Dict[(int, int), float] = {start_pos: 0}
+
+        came_from = np.empty(inp_arrs[0].shape, np.ushort)
+        came_from[start_pos[1]][start_pos[0]] = 0
+
+        cost_so_far = np.full(inp_arrs[0].shape, np.inf, np.float64)
+        cost_so_far[start_pos[1]][start_pos[0]] = 0
 
         starting_heuristic = a_star_heuristic(start_pos, end_pos)
         min_heuristic = starting_heuristic
@@ -312,12 +326,12 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
                 break
 
             neighbors = [n for n in get_neighbors(current, inp_arrs[0].shape[1], inp_arrs[0].shape[1]) if
-                         (min_val is None or inp_arrs[0][n[1]][n[0]] >= min_val) and
-                         (max_val is None or inp_arrs[0][n[1]][n[0]] <= max_val) and
+                         (min_val is None or inp_arrs[0][n[0][1]][n[0][0]] >= min_val) and
+                         (max_val is None or inp_arrs[0][n[0][1]][n[0][0]] <= max_val) and
                          (traversability_expression is None or
                           eval_expression_at_pos(traversability_expression_str, n, inp_arrs, traversability_expression))
                          ]
-            for next_pos in neighbors:
+            for next_pos, direction in neighbors:
                 if cost_expression is None:
                     add_cost = 1
                 else:
@@ -327,22 +341,28 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
                         feedback.pushInfo(
                             self.tr("[WARNING] Custom cost expression is less than 1, path may not be optimal!"))
 
-                new_cost = cost_so_far[current] + add_cost
-                if next_pos not in cost_so_far or new_cost < cost_so_far[next_pos]:
-                    cost_so_far[next_pos] = new_cost
+                new_cost = cost_so_far[current[1]][current[0]] + add_cost
+                if new_cost < cost_so_far[next_pos[1]][next_pos[0]]:
+                    cost_so_far[next_pos[1]][next_pos[0]] = new_cost
                     heuristic = a_star_heuristic(next_pos, end_pos)
                     min_heuristic = min(min_heuristic, heuristic)
                     frontier.put(next_pos, new_cost + heuristic)
-                    came_from[next_pos] = current
+                    came_from[next_pos[1]][next_pos[0]] = DIRECTION_MAPPING[direction]
 
         print("Reconstructing path")
         current_point = end_pos
         last_point = None
         path = []
         while True:
+            print(current_point)
             if feedback.isCanceled():
                 raise RuntimeError("Task Cancelled")
-            next_point = came_from[current_point]
+            delta_code = came_from[current_point[1]][current_point[0]]
+            if delta_code == 0:
+                next_point = None
+            else:
+                delta = DIRECTION_MAPPING_INV[delta_code]
+                next_point = (current_point[0] - delta[0], current_point[1] - delta[1])
             if last_point is None or next_point is None or \
                     next_point[0] - current_point[0] != current_point[0] - last_point[0] or \
                     next_point[1] - current_point[1] != current_point[1] - last_point[1]:
