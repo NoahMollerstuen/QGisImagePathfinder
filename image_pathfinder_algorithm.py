@@ -325,7 +325,7 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
             if current == end_pos:
                 break
 
-            neighbors = [n for n in get_neighbors(current, inp_arrs[0].shape[1], inp_arrs[0].shape[1]) if
+            neighbors = [n for n in get_neighbors(current, inp_arrs[0].shape[1], inp_arrs[0].shape[0]) if
                          (min_val is None or inp_arrs[0][n[0][1]][n[0][0]] >= min_val) and
                          (max_val is None or inp_arrs[0][n[0][1]][n[0][0]] <= max_val) and
                          (traversability_expression is None or
