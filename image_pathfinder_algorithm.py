@@ -40,6 +40,7 @@ from qgis.core import (QgsProject,
                        QgsProcessingParameterRasterLayer,
                        QgsProcessingParameterPoint,
                        QgsProcessingParameterNumber,
+                       QgsProcessingParameterString,
                        QgsProcessingParameterFeatureSink,
                        QgsWkbTypes,
                        QgsFields,
@@ -49,6 +50,8 @@ from qgis.core import (QgsProject,
                        QgsRectangle)
 from osgeo import gdal
 import heapq
+
+from image_pathfinder.formulas import evaluate_formula
 
 NEIGHBORS = ((0, 1), (1, 0), (0, -1), (-1, 0))
 
@@ -110,11 +113,13 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
     # used when calling the algorithm from another algorithm, or when
     # calling from the QGIS console.
     OUTPUT = 'OUTPUT'
-    INPUT_IMG = 'INPUT'
+
+    INPUT_IMG = 'INPUT_IMG'
     INPUT_POINT1 = 'INPUT_POINT1'
     INPUT_POINT2 = 'INPUT_POINT2'
     INPUT_MIN_VAL = 'INPUT_MIN_VAL'
     INPUT_MAX_VAL = 'INPUT_MAX_VAL'
+    INPUT_EXPRESSION = 'INPUT_EXPRESSION'
 
     def initAlgorithm(self, config):
         """
@@ -122,7 +127,6 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         with some other properties.
         """
 
-        # We add the input raster features source.
         self.addParameter(
             QgsProcessingParameterRasterLayer(
                 self.INPUT_IMG,
@@ -160,6 +164,14 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        self.addParameter(
+            QgsProcessingParameterString(
+                self.INPUT_EXPRESSION,
+                self.tr('Custom Cost Function'),
+                optional=True
+            )
+        )
+
         # We add a feature sink in which to store our processed features (this
         # usually takes the form of a newly created vector layer when the
         # algorithm is run in QGIS).
@@ -183,6 +195,11 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         end_point = self.parameterAsPoint(parameters, self.INPUT_POINT2, context)
         min_val = self.parameterAsString(parameters, self.INPUT_MIN_VAL, context)
         max_val = self.parameterAsString(parameters, self.INPUT_MAX_VAL, context)
+        cost_expression = self.parameterAsString(parameters, self.INPUT_EXPRESSION, context)
+        if cost_expression == "":
+            cost_expression = None
+        print(cost_expression)
+
         try:
             min_val = int(min_val)
         except ValueError:
@@ -244,7 +261,9 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
                 break
 
             for next_pos in get_neighbors(current, occupancy_mat):
-                new_cost = cost_so_far[current] + 1
+                add_cost = (1 if cost_expression is None else
+                            evaluate_formula(cost_expression, {"val": inp_arr[current[1]][current[0]]}))
+                new_cost = cost_so_far[current] + add_cost
                 if next_pos not in cost_so_far or new_cost < cost_so_far[next_pos]:
                     cost_so_far[next_pos] = new_cost
                     heuristic = a_star_heuristic(next_pos, end_pos)
