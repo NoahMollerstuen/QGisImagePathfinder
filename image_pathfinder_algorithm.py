@@ -39,6 +39,7 @@ from qgis.core import (QgsProject,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterRasterLayer,
                        QgsProcessingParameterPoint,
+                       QgsProcessingParameterEnum,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterString,
                        QgsProcessingParameterFeatureSink,
@@ -144,6 +145,7 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
     INPUT_POINT2 = 'INPUT_POINT2'
     INPUT_MIN_VAL = 'INPUT_MIN_VAL'
     INPUT_MAX_VAL = 'INPUT_MAX_VAL'
+    INPUT_COST_ENUM = 'INPUT_COST_ENUM'
     INPUT_TRAVERSABILITY_EXPRESSION = 'INPUT_TRAVERSABILITY_EXPRESSION'
     INPUT_COST_EXPRESSION = 'INPUT_COST_EXPRESSION'
 
@@ -215,6 +217,20 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
         )
 
         self.addParameter(
+            QgsProcessingParameterEnum(
+                self.INPUT_COST_ENUM,
+                self.tr("Cost Layer"),
+                (
+                    "Primary",
+                    "Secondary",
+                    "Tertiary",
+                    "Custom"
+                ),
+                defaultValue="Primary"
+            )
+        )
+
+        self.addParameter(
             QgsProcessingParameterString(
                 self.INPUT_COST_EXPRESSION,
                 self.tr('Custom Cost Expression'),
@@ -253,6 +269,9 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
             max_val = float(max_val)
         except ValueError:
             max_val = None
+
+        cost_enum = self.parameterAsEnum(parameters, self.INPUT_COST_ENUM, context)
+        cost_layer = cost_enum if cost_enum < 4 else None
 
         cost_expression_str = self.parameterAsString(parameters, self.INPUT_COST_EXPRESSION, context)
         if cost_expression_str == "":
@@ -332,14 +351,16 @@ class PathfinderAlgorithm(QgsProcessingAlgorithm):
                           eval_expression_at_pos(traversability_expression_str, n, inp_arrs, traversability_expression))
                          ]
             for next_pos, direction in neighbors:
-                if cost_expression is None:
-                    add_cost = 1
-                else:
+                if cost_layer is not None:
+                    add_cost = inp_arrs[cost_layer][next_pos[1]][next_pos[0]]
+                elif cost_expression is not None:
                     add_cost = eval_expression_at_pos(cost_expression_str, next_pos, inp_arrs, cost_expression)
                     if not warned_inadmissible_heuristic and add_cost < 1:
                         warned_inadmissible_heuristic = True
                         feedback.pushInfo(
                             self.tr("[WARNING] Custom cost expression is less than 1, path may not be optimal!"))
+                else:
+                    add_cost = 1
 
                 new_cost = cost_so_far[current[1]][current[0]] + add_cost
                 if new_cost < cost_so_far[next_pos[1]][next_pos[0]]:
