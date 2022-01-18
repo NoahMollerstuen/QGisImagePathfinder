@@ -31,7 +31,8 @@ __copyright__ = '(C) 2022 by Noah Mollerstuen'
 __revision__ = '$Format:%H$'
 
 from qgis.core import QgsProcessingProvider
-from .image_pathfinder_algorithm import PathfinderAlgorithm
+from .grid_pathfinder_algorithm import GridPathfinderAlgorithm
+# from .any_angle_pathfinder_algorithm import AnyAnglePathfinderAlgorithm
 
 
 class PathfinderProvider(QgsProcessingProvider):
@@ -53,9 +54,8 @@ class PathfinderProvider(QgsProcessingProvider):
         """
         Loads all algorithms belonging to this provider.
         """
-        self.addAlgorithm(PathfinderAlgorithm())
-        # add additional algorithms here
-        # self.addAlgorithm(MyOtherAlgorithm())
+        self.addAlgorithm(GridPathfinderAlgorithm())
+        # self.addAlgorithm(AnyAnglePathfinderAlgorithm())
 
     def id(self):
         """
